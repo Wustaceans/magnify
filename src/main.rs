@@ -6,13 +6,18 @@ use iced::{
 };
 use rfd::FileDialog;
 use serde::{Deserialize, Serialize};
-use std::{env, path::PathBuf};
+use std::{env, fmt::format, path::Path, path::PathBuf};
+use tokio::{
+    fs::{self, File},
+    io::AsyncWriteExt,
+};
 
 #[derive(Debug, Deserialize, Default, Clone)]
 struct Information {
     id: u64,
     username: String,
     avatar_url: String,
+    banner_url: String,
     global_name: String,
     date_created: u32,
     has_nitro: bool,
@@ -65,15 +70,48 @@ enum Message {
 
 impl App {
     async fn download_avatar(id: String, avatar_url: String) -> Result<Bytes> {
-        let url = format!("https://cdn.discordapp.com/avatars/{id}/{avatar_url}.png");
+        let extension = if avatar_url.contains("a_") {
+            "gif"
+        } else {
+            "png"
+        };
+
+        let url = format!("https://cdn.discordapp.com/avatars/{id}/{avatar_url}.{extension}");
+        let request = reqwest::get(&url).await?;
+
+        Ok(request.bytes().await?)
+    }
+
+    async fn download_banner(id: String, banner_url: String) -> Result<Bytes> {
+        let extension = if banner_url.contains("a_") {
+            "gif"
+        } else {
+            "png"
+        };
+
+        let url = format!("https://cdn.discordapp.com/banners/{id}/{banner_url}.{extension}");
         let request = reqwest::get(&url).await?;
 
         Ok(request.bytes().await?)
     }
 
     async fn save_avatar_to(dest: PathBuf, contents: Bytes) -> Result<()> {
-        tokio::fs::write(dest, contents).await?;
+        let mut file = File::create(&dest).await?;
+
+        file.write_all(&contents).await?;
         Ok(())
+    }
+
+    async fn check_if_file_exists(file_path: String) -> Option<String> {
+        let extensions = vec![".png", ".gif"];
+
+        for ext in extensions {
+            let full_path = format!("{}{}", file_path, ext);
+            if Path::new(&full_path).exists() {
+                return Some(ext.to_string());
+            }
+        }
+        None
     }
 
     async fn request(url: String) -> Result<Information> {
@@ -103,6 +141,7 @@ impl App {
                 username: discord_info.username,
                 global_name: discord_info.global_name.unwrap_or_default(),
                 avatar_url: discord_info.avatar.unwrap_or_default(),
+                banner_url: discord_info.banner.unwrap_or_default(),
                 date_created: 0,
                 has_nitro: discord_info.premium_type.unwrap_or_default() == 1,
             };
@@ -111,6 +150,12 @@ impl App {
 
             let avatar =
                 Self::download_avatar(info.id.to_string(), info.avatar_url.clone()).await?;
+            let banner =
+                Self::download_banner(info.id.to_string(), info.banner_url.clone()).await?;
+
+            Self::save_avatar_to(PathBuf::from(format!("/tmp/{}", info.id)), avatar).await?;
+            Self::save_avatar_to(PathBuf::from(format!("/tmp/{}", info.banner_url)), banner)
+                .await?;
 
             return Ok(info);
         })
@@ -156,7 +201,12 @@ impl App {
     }
 
     fn view(&self) -> Element<Message> {
-        let path: String = format!("/tmp/{}.png", self.info.id);
+        let pfp_check = Self::check_if_file_exists(format!("/tmp/{}", info.id)).await;
+        let banner_check = Self::check_if_file_exists(format!("/tmp/{}", info.banner_url)).await;
+
+        let pfp_path: String = format!("/tmp/{}.{}", self.info.id, pfp_check);
+
+        let banner_path: String = format!("/tmp/{}.{}", self.info.banner_url, banner_check);
 
         let mut col = column![
             text_input("user id", &self.user_id).on_input(Message::IdChanged),
@@ -164,7 +214,8 @@ impl App {
         ];
 
         if self.request_made {
-            col = col.push(image(Handle::from_path(path)));
+            col = col.push(image(Handle::from_path(banner_path)));
+            col = col.push(image(Handle::from_path(pfp_path)));
             col = col.push(text(format!("Username: {}", &self.info.username)));
             col = col.push(text(format!("Global Name: {}", &self.info.global_name)));
         }
